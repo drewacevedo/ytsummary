@@ -24,8 +24,8 @@ Before using this tool, you'll need:
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/youtube-summarizer.git
-   cd youtube-summarizer
+   git clone https://github.com/drewacevedo/ytsummary.git
+   cd ytsummary
    ```
 
 2. **Install dependencies**:
@@ -46,22 +46,22 @@ Before using this tool, you'll need:
 
 **Process videos from a YouTube channel (last 7 days):**
 ```bash
-python youtube_summarizer.py @meetandrew --days 7
+python ytsummary.py @meetandrew --days 7
 ```
 
 **Process multiple channels:**
 ```bash
-python youtube_summarizer.py "@meetandrew,@codingwithdrew" --days 3
+python ytsummary.py "@meetandrew,@codingwithdrew" --days 3
 ```
 
 **Process specific video IDs:**
 ```bash
-python youtube_summarizer.py dQw4w9WgXcQ --video-ids
+python ytsummary.py dQw4w9WgXcQ --video-ids
 ```
 
 **Process multiple video IDs:**
 ```bash
-python youtube_summarizer.py "dQw4w9WgXcQ,jNQXAC9IVRw" --video-ids
+python ytsummary.py "dQw4w9WgXcQ,jNQXAC9IVRw" --video-ids
 ```
 
 ### Command Line Options
@@ -72,49 +72,68 @@ python youtube_summarizer.py "dQw4w9WgXcQ,jNQXAC9IVRw" --video-ids
 | `--days` | `-d` | Number of days to look back for videos | 1 |
 | `--video-ids` | `-v` | Treat inputs as video IDs instead of channel handles | False |
 | `--prompt` | `-p` | Path to the prompt file for AI summarization | prompt.txt |
+| `--include-previous` | - | Copy existing summaries from previous runs instead of regenerating | False |
 
 ### Examples
 
 ```bash
 # Get videos from the last 24 hours
-python youtube_summarizer.py @meetandrew
+python ytsummary.py @meetandrew
 
 # Get videos from the last week
-python youtube_summarizer.py @meetandrew --days 7
+python ytsummary.py @meetandrew --days 7
 
 # Process specific videos
-python youtube_summarizer.py "dQw4w9WgXcQ,jNQXAC9IVRw" -v
+python ytsummary.py "dQw4w9WgXcQ,jNQXAC9IVRw" -v
 
 # Multiple channels, last 3 days
-python youtube_summarizer.py "@meetandrew,@codingwithdrew,@coffeezilla" -d 3
+python ytsummary.py "@meetandrew,@codingwithdrew,@coffeezilla" -d 3
 
 # Use a custom prompt file
-python youtube_summarizer.py @meetandrew --prompt custom_prompt.txt
+python ytsummary.py @meetandrew --prompt custom_prompt.txt
+
+# Include existing summaries from previous runs (saves API costs)
+python ytsummary.py @meetandrew --days 7 --include-previous
 
 # Use different prompts for different content types
-python youtube_summarizer.py @educationalchannel --prompt educational_prompt.txt
-python youtube_summarizer.py @techchannel --prompt tech_prompt.txt
+python ytsummary.py @educationalchannel --prompt educational_prompt.txt
+python ytsummary.py @techchannel --prompt tech_prompt.txt
 ```
 
 ## Output Structure
 
-The tool creates two directories:
+The tool creates organized datetime folders within the `processed/` directory for each run:
 
 ```
 project/
-├── transcripts/
-│   ├── VIDEO_ID_transcript.txt
-│   └── ...
-├── summaries/
-│   ├── VIDEO_ID_summary.md
-│   └── ...
+├── processed/
+│   ├── MMDDYY_HHMM/           # Datetime folder (e.g., 080625_1930)
+│   │   ├── transcripts/
+│   │   │   ├── VIDEO_ID_transcript.txt
+│   │   │   └── ...
+│   │   └── summaries/
+│   │       ├── VIDEO_ID_summary.md
+│   │       └── ...
+│   └── MMDDYY_HHMM_1/         # Additional runs (if multiple in same minute)
+│       ├── transcripts/
+│       └── summaries/
+├── transcripts/               # Legacy directory (still present)
+├── summaries/                 # Legacy directory (still present)
+├── prompts/
 └── prompt.txt
 ```
+
+### Datetime Folder Structure
+
+- **Format**: `MMDDYY_HHMM` (e.g., `080625_1930` for August 6, 2025 at 7:30 PM)
+- **Duplicates**: If multiple runs occur in the same minute, folders are numbered (e.g., `080625_1930_1`)
+- **Organization**: Each run is completely self-contained within its datetime folder
+- **Smart Reuse**: The tool searches previous datetime folders for existing transcripts to avoid re-downloading
 
 ### Summary Format
 
 Each summary file includes:
-- Video metadata (title, ID, publish date)
+- Video metadata (title, channel handle, ID, publish date)
 - Generation timestamp
 - AI-generated summary based on your prompt
 
@@ -149,13 +168,13 @@ You are a news summarizer. Extract the key facts, main story points, and importa
 
 ```bash
 # Use educational prompt for educational channels
-python youtube_summarizer.py @khanacademy --prompt educational_prompt.txt
+python ytsummary.py @khanacademy --prompt educational_prompt.txt
 
 # Use tech prompt for technology channels  
-python youtube_summarizer.py @mkbhd --prompt tech_prompt.txt
+python ytsummary.py @mkbhd --prompt tech_prompt.txt
 
 # Use news prompt for news channels
-python youtube_summarizer.py @cnn --prompt news_prompt.txt
+python ytsummary.py @cnn --prompt news_prompt.txt
 ```
 
 This flexibility allows you to tailor the AI's summarization style to match the content type and your specific needs.
@@ -201,12 +220,18 @@ model="anthropic/claude-3-haiku",  # Example alternative
 
 ```
 youtube-summarizer/
-├── youtube_summarizer.py    # Main script
+├── ytsummary.py    # Main script
 ├── requirements.txt         # Python dependencies
 ├── prompt.txt              # AI summarization prompt
 ├── .env                    # Environment variables (create this)
-├── transcripts/            # Generated transcripts
-├── summaries/              # Generated summaries
+├── processed/              # Organized datetime folders for each run
+│   ├── MMDDYY_HHMM/        # Individual run folders
+│   │   ├── transcripts/    # Transcripts for this run
+│   │   └── summaries/      # Summaries for this run
+│   └── ...
+├── transcripts/            # Legacy directory (may contain old files)
+├── summaries/              # Legacy directory (may contain old files)
+├── prompts/                # Additional prompt files directory
 └── README.md              # This file
 ```
 

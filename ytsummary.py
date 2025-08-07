@@ -1,6 +1,8 @@
 import os
 import tempfile
 import argparse
+import shutil
+import glob
 from openai import OpenAI
 from googleapiclient.discovery import build
 import yt_dlp
@@ -82,6 +84,7 @@ def get_channel_id_from_handle(youtube, channel_handle):
 def get_channel_videos(youtube, channel_id, cutoff_date):
     """
     Fetches videos from a specific YouTube channel published after a cutoff date.
+    Excludes live streams and previously recorded live sessions.
     
     Args:
         youtube: The authenticated YouTube Data API service object.
@@ -112,20 +115,51 @@ def get_channel_videos(youtube, channel_id, cutoff_date):
             )
             playlist_response = playlist_request.execute()
 
+            # Collect video IDs to batch fetch their details
+            video_ids_batch = []
+            video_items_map = {}
+            
             for item in playlist_response['items']:
                 video_published_at_str = item['snippet']['publishedAt']
                 # Parse the ISO 8601 date string
                 video_published_at = datetime.fromisoformat(video_published_at_str.replace('Z', '+00:00'))
 
                 if video_published_at >= cutoff_date:
-                    videos.append({
-                        'id': item['snippet']['resourceId']['videoId'],
+                    video_id = item['snippet']['resourceId']['videoId']
+                    video_ids_batch.append(video_id)
+                    video_items_map[video_id] = {
+                        'id': video_id,
                         'title': item['snippet']['title'],
                         'published_at': video_published_at
-                    })
+                    }
                 else:
                     # Videos are sorted by date, so we can stop once we pass the cutoff
-                    return videos
+                    break
+            
+            # Batch fetch video details to check for live streaming
+            if video_ids_batch:
+                video_details_request = youtube.videos().list(
+                    part='liveStreamingDetails',
+                    id=','.join(video_ids_batch)
+                )
+                video_details_response = video_details_request.execute()
+                
+                # Filter out live content
+                for video_detail in video_details_response['items']:
+                    video_id = video_detail['id']
+                    is_live_content = 'liveStreamingDetails' in video_detail
+                    
+                    if not is_live_content:
+                        # Only add non-live content
+                        video_items_map[video_id]['is_live_content'] = False
+                        video_items_map[video_id]['channel_id'] = channel_id
+                        videos.append(video_items_map[video_id])
+                    else:
+                        print(f"🔴 Skipping live content: {video_items_map[video_id]['title']}")
+            
+            # Check if we hit the cutoff date
+            if len(video_ids_batch) == 0:
+                break
             
             next_page_token = playlist_response.get('nextPageToken')
             if not next_page_token:
@@ -205,6 +239,45 @@ def get_transcript(video_id):
         print(f"An error occurred retrieving transcript for video ID {video_id}: {e}")
         return None
 
+def get_channel_handle_from_id(youtube, channel_id):
+    """
+    Gets the channel handle from a channel ID.
+    
+    Args:
+        youtube: The authenticated YouTube Data API service object.
+        channel_id (str): The ID of the YouTube channel.
+
+    Returns:
+        str: The channel handle (with @ symbol) if found, None otherwise.
+    """
+    try:
+        channel_request = youtube.channels().list(
+            part='snippet',
+            id=channel_id
+        )
+        channel_response = channel_request.execute()
+        
+        if channel_response['items']:
+            channel_info = channel_response['items'][0]['snippet']
+            
+            # Try to get the custom URL which often contains the handle
+            if 'customUrl' in channel_info:
+                custom_url = channel_info['customUrl']
+                # Custom URL might be in format @handle or just handle
+                if custom_url.startswith('@'):
+                    return custom_url
+                else:
+                    return f"@{custom_url}"
+            
+            # If no custom URL, return the channel title as fallback
+            return f"@{channel_info['title']}"
+        
+        return None
+        
+    except Exception as e:
+        print(f"An error occurred getting channel handle for ID {channel_id}: {e}")
+        return None
+
 def get_video_details(youtube, video_id):
     """
     Fetches video details for a specific YouTube video ID.
@@ -218,7 +291,7 @@ def get_video_details(youtube, video_id):
     """
     try:
         video_request = youtube.videos().list(
-            part='snippet',
+            part='snippet,liveStreamingDetails',
             id=video_id
         )
         video_response = video_request.execute()
@@ -229,10 +302,16 @@ def get_video_details(youtube, video_id):
             # Parse the ISO 8601 date string
             video_published_at = datetime.fromisoformat(video_published_at_str.replace('Z', '+00:00'))
             
+            # Check if this is a live stream (past or present)
+            is_live_content = 'liveStreamingDetails' in item
+            
             return {
                 'id': video_id,
                 'title': item['snippet']['title'],
-                'published_at': video_published_at
+                'published_at': video_published_at,
+                'is_live_content': is_live_content,
+                'channel_id': item['snippet']['channelId'],
+                'channel_title': item['snippet']['channelTitle']
             }
         else:
             print(f"❌ No video found for ID: {video_id}")
@@ -284,6 +363,81 @@ def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt'):
     except Exception as e:
         return f"An error occurred during summarization: {e}"
 
+def create_datetime_folder():
+    """
+    Creates a datetime folder with format MMDDYY_HHMM inside the processed/ directory.
+    If duplicate exists, increments with underscore and number.
+    
+    Returns:
+        str: Path to the created datetime folder
+    """
+    now = datetime.now()
+    base_folder_name = now.strftime("%m%d%y_%H%M")
+    
+    # Ensure processed directory exists
+    processed_dir = "processed"
+    os.makedirs(processed_dir, exist_ok=True)
+    
+    # Check for duplicates and increment if necessary
+    counter = 0
+    folder_name = os.path.join(processed_dir, base_folder_name)
+    
+    while os.path.exists(folder_name):
+        counter += 1
+        folder_name = os.path.join(processed_dir, f"{base_folder_name}_{counter}")
+    
+    # Create the datetime folder and subfolders
+    os.makedirs(folder_name, exist_ok=True)
+    transcripts_folder = os.path.join(folder_name, "transcripts")
+    summaries_folder = os.path.join(folder_name, "summaries")
+    os.makedirs(transcripts_folder, exist_ok=True)
+    os.makedirs(summaries_folder, exist_ok=True)
+    
+    print(f"📁 Created datetime folder: {folder_name}")
+    return folder_name
+
+def find_existing_transcript(video_id, current_datetime_folder):
+    """
+    Searches for existing transcript files in other datetime folders within the processed/ directory.
+    
+    Args:
+        video_id (str): The video ID to search for
+        current_datetime_folder (str): The current datetime folder to exclude from search
+    
+    Returns:
+        tuple: (transcript_path, summary_path) if found, (None, None) otherwise
+    """
+    processed_dir = "processed"
+    
+    # Check if processed directory exists
+    if not os.path.exists(processed_dir):
+        return None, None
+    
+    # Get all datetime folders (format: MMDDYY_HHMM or MMDDYY_HHMM_N) within processed/
+    datetime_folders = []
+    for item in os.listdir(processed_dir):
+        item_path = os.path.join(processed_dir, item)
+        if os.path.isdir(item_path) and item_path != current_datetime_folder:
+            # Check if it matches datetime pattern
+            parts = item.split('_')
+            if len(parts) >= 2:
+                date_part = parts[0]
+                time_part = parts[1]
+                if (len(date_part) == 6 and date_part.isdigit() and 
+                    len(time_part) == 4 and time_part.isdigit()):
+                    datetime_folders.append(item_path)
+    
+    # Search for transcript and summary files
+    for folder in datetime_folders:
+        transcript_path = os.path.join(folder, "transcripts", f"{video_id}_transcript.txt")
+        summary_path = os.path.join(folder, "summaries", f"{video_id}_summary.md")
+        
+        if os.path.exists(transcript_path):
+            summary_exists = os.path.exists(summary_path)
+            return transcript_path, summary_path if summary_exists else None
+    
+    return None, None
+
 def main():
     """
     Main function to orchestrate fetching, transcribing, and summarizing videos.
@@ -297,6 +451,7 @@ def main():
     parser.add_argument('--days', '-d', type=int, default=1, help='Number of days to look back for videos (default: 1)')
     parser.add_argument('--video-ids', '-v', action='store_true', help='Treat inputs as video IDs instead of channel handles')
     parser.add_argument('--prompt', '-p', type=str, default='prompt.txt', help='Path to the prompt file for AI summarization (default: prompt.txt)')
+    parser.add_argument('--include-previous', action='store_true', help='Copy existing summaries from previous datetime folders instead of regenerating them')
     
     args = parser.parse_args()
     
@@ -318,11 +473,10 @@ def main():
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_check)
     youtube_service = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
     
-    # Create directories to save transcripts and summaries
-    transcript_dir = "transcripts"
-    summary_dir = "summaries"
-    os.makedirs(transcript_dir, exist_ok=True)
-    os.makedirs(summary_dir, exist_ok=True)
+    # Create datetime folder structure
+    datetime_folder = create_datetime_folder()
+    transcript_dir = os.path.join(datetime_folder, "transcripts")
+    summary_dir = os.path.join(datetime_folder, "summaries")
     
     # 4. Collect all videos
     all_videos = []
@@ -335,6 +489,11 @@ def main():
             
             video_details = get_video_details(youtube_service, video_id)
             if video_details:
+                # Check if this is live content
+                if video_details['is_live_content']:
+                    print(f"🔴 Skipping live content: {video_details['title']}")
+                    continue
+                
                 # Check if video meets date criteria (only if days filter is meaningful)
                 if days_to_check > 0 and video_details['published_at'] < cutoff_date:
                     print(f"⚠️  Video '{video_details['title']}' was published before the cutoff date. Skipping...")
@@ -375,51 +534,70 @@ def main():
 
     print(f"\n🎬 Total videos to process: {len(all_videos)}")
     
-    # 5. PHASE 1: Download all transcripts first
-    print(f"\n{'='*60}\nPHASE 1: DOWNLOADING TRANSCRIPTS\n{'='*60}")
+    # 5. PHASE 1: Process transcripts with duplicate checking
+    print(f"\n{'='*60}\nPHASE 1: PROCESSING TRANSCRIPTS\n{'='*60}")
     
-    # Track transcript files processed in this run
-    current_run_transcript_files = []
+    # Track video IDs processed in this run
+    processed_video_ids = []
+    skipped_video_ids = []
     
     for i, video in enumerate(all_videos, 1):
-        print(f"\n[{i}/{len(all_videos)}] Downloading transcript for: {video['title']}")
+        print(f"\n[{i}/{len(all_videos)}] Processing transcript for: {video['title']}")
         
         transcript_filename = os.path.join(transcript_dir, f"{video['id']}_transcript.txt")
-        transcript_file_basename = f"{video['id']}_transcript.txt"
+        summary_filename = os.path.join(summary_dir, f"{video['id']}_summary.md")
         
-        # Check if transcript already exists
-        if os.path.exists(transcript_filename):
-            print(f"📄 Transcript already exists: {transcript_filename}")
-            current_run_transcript_files.append(transcript_file_basename)
-            continue
+        # Check if transcript was already downloaded in other datetime folders
+        existing_transcript_path, existing_summary_path = find_existing_transcript(video['id'], datetime_folder)
         
-        # Download transcript
-        transcript = get_transcript(video['id'])
-        
-        if transcript:
-            # Save transcript to a file (timestamps already omitted in get_transcript function)
-            with open(transcript_filename, 'w', encoding='utf-8') as f:
-                f.write(transcript)
-            print(f"✅ Transcript saved to: {transcript_filename}")
-            current_run_transcript_files.append(transcript_file_basename)
+        if existing_transcript_path:
+            print(f"🔍 Found existing transcript: {existing_transcript_path}")
+            
+            # Always copy existing transcript to current datetime folder
+            print(f"📋 Copying existing transcript to current folder...")
+            shutil.copy2(existing_transcript_path, transcript_filename)
+            
+            # Only copy existing summary if --include-previous is specified
+            if args.include_previous and existing_summary_path:
+                print(f"📋 Copying existing summary to current folder...")
+                shutil.copy2(existing_summary_path, summary_filename)
+            
+            processed_video_ids.append(video['id'])
+            print(f"✅ Copied existing transcript for video: {video['title']}")
         else:
-            print(f"❌ Could not retrieve transcript for video {video['id']}")
+            # Download new transcript
+            print(f"📥 Downloading new transcript...")
+            transcript = get_transcript(video['id'])
+            
+            if transcript:
+                # Save transcript to a file
+                with open(transcript_filename, 'w', encoding='utf-8') as f:
+                    f.write(transcript)
+                print(f"✅ Transcript saved to: {transcript_filename}")
+                processed_video_ids.append(video['id'])
+            else:
+                print(f"❌ Could not retrieve transcript for video {video['id']}")
 
-    # 6. PHASE 2: Generate summaries with transcript file list in header
+    # 6. PHASE 2: Generate summaries
     print(f"\n{'='*60}\nPHASE 2: GENERATING SUMMARIES\n{'='*60}")
     
-    # Sort the transcript files from current run
-    current_run_transcript_files.sort()
+    # Track video IDs that were summarized in this run
+    summarized_video_ids = []
     
     for i, video in enumerate(all_videos, 1):
+        # Skip videos that were not processed in Phase 1
+        if video['id'] in skipped_video_ids:
+            continue
+            
         print(f"\n[{i}/{len(all_videos)}] Processing summary for: {video['title']}")
         
         transcript_filename = os.path.join(transcript_dir, f"{video['id']}_transcript.txt")
         summary_filename = os.path.join(summary_dir, f"{video['id']}_summary.md")
         
-        # Skip if summary already exists
+        # Skip if summary already exists (from copying in Phase 1)
         if os.path.exists(summary_filename):
             print(f"📄 Summary already exists: {summary_filename}")
+            summarized_video_ids.append(video['id'])
             continue
         
         # Check if transcript exists
@@ -435,18 +613,50 @@ def main():
         print(f"🧠 Summarizing with OpenRouter using prompt: {args.prompt}...")
         summary = summarize_with_openrouter(OPENROUTER_API_KEY, transcript, args.prompt)
         
-        # Save summary to a file with transcript file list in header
-        with open(summary_filename, 'w', encoding='utf-8') as f:
-            f.write(f"Video Title: {video['title']}\n")
-            f.write(f"Video ID: {video['id']}\n")
-            f.write(f"Published At: {video['published_at']}\n")
-            f.write(f"Summary Generated At: {datetime.now()}\n")
-            f.write("-" * 50 + "\n\n")
-            f.write(summary)
-        print(f"✅ Summary saved to: {summary_filename}")
+        # Only proceed if summary generation was successful (not an error message)
+        if summary and not summary.startswith("Error:") and not summary.startswith("An error occurred"):
+            # Get channel handle if available
+            channel_handle = None
+            if 'channel_id' in video:
+                channel_handle = get_channel_handle_from_id(youtube_service, video['channel_id'])
+            
+            # Save summary to a file
+            with open(summary_filename, 'w', encoding='utf-8') as f:
+                f.write(f"Video Title: {video['title']}\n")
+                if channel_handle:
+                    f.write(f"Channel Handle: {channel_handle}\n")
+                f.write(f"Video ID: {video['id']}\n")
+                f.write(f"Published At: {video['published_at']}\n")
+                f.write(f"Summary Generated At: {datetime.now()}\n")
+                f.write("-" * 50 + "\n\n")
+                f.write(summary)
+            print(f"✅ Summary saved to: {summary_filename}")
+            
+            # Only add to summarized video IDs list if summary was successfully generated
+            summarized_video_ids.append(video['id'])
+            
+            print("\n📌 **SUMMARY:**")
+            print(summary)
+        else:
+            print(f"❌ Failed to generate summary for video {video['id']}: {summary}")
+    
+    # Print final results
+    print(f"\n{'='*60}")
+    print("PROCESSING RESULTS:")
+    print(f"📁 Datetime folder: {datetime_folder}")
+    print(f"📥 Processed videos: {len(processed_video_ids)}")
+    print(f"⏭️  Skipped videos: {len(skipped_video_ids)}")
+    print(f"📝 Summarized videos: {len(summarized_video_ids)}")
+    
+    if summarized_video_ids:
+        print(f"\nSUMMARIZED VIDEO IDs:")
+        print(','.join(summarized_video_ids))
+    
+    if skipped_video_ids:
+        print(f"\nSKIPPED VIDEO IDs:")
+        print(','.join(skipped_video_ids))
         
-        print("\n📌 **SUMMARY:**")
-        print(summary)
+    print(f"{'='*60}")
 
 if __name__ == '__main__':
     main()
