@@ -321,7 +321,7 @@ def get_video_details(youtube, video_id):
         print(f"An error occurred fetching video details for {video_id}: {e}")
         return None
 
-def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt'):
+def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt', model='qwen/qwen3-30b-a3b-instruct-2507'):
     """
     Summarizes a given text using OpenRouter API.
 
@@ -329,6 +329,7 @@ def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt'):
         api_key (str): Your OpenRouter API key.
         transcript (str): The text to be summarized.
         prompt_file (str): Path to the prompt file for AI summarization.
+        model (str): The model to use for summarization.
 
     Returns:
         str: The generated summary, or an error message.
@@ -351,12 +352,12 @@ def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt'):
         prompt = f"{prompt_template}\n\n---\n\n{transcript}"
         
         response = client.chat.completions.create(
-            model="qwen/qwen3-30b-a3b-instruct-2507",  # You can change this to other models available on OpenRouter
+            model=model,
             messages=[
                 {"role": "user", "content": prompt}
             ],
             max_tokens=4000,
-            temperature=0.5
+            temperature=0.3
         )
         
         return response.choices[0].message.content
@@ -451,6 +452,7 @@ def main():
     parser.add_argument('--days', '-d', type=int, default=1, help='Number of days to look back for videos (default: 1)')
     parser.add_argument('--video-ids', '-v', action='store_true', help='Treat inputs as video IDs instead of channel handles')
     parser.add_argument('--prompt', '-p', type=str, default='prompt.txt', help='Path to the prompt file for AI summarization (default: prompt.txt)')
+    parser.add_argument('--model', '-m', type=str, default='qwen/qwen3-30b-a3b-instruct-2507', help='Model to use for summarization (default: qwen/qwen3-30b-a3b-instruct-2507)')
     parser.add_argument('--include-previous', action='store_true', help='Copy existing summaries from previous datetime folders instead of regenerating them')
     
     args = parser.parse_args()
@@ -494,8 +496,9 @@ def main():
                     print(f"🔴 Skipping live content: {video_details['title']}")
                     continue
                 
-                # Check if video meets date criteria (only if days filter is meaningful)
-                if days_to_check > 0 and video_details['published_at'] < cutoff_date:
+                # Skip date check when video IDs are provided directly
+                # Check if video meets date criteria (only if days filter is meaningful and not using video IDs)
+                if not args.video_ids and days_to_check > 0 and video_details['published_at'] < cutoff_date:
                     print(f"⚠️  Video '{video_details['title']}' was published before the cutoff date. Skipping...")
                     continue
                 
@@ -610,8 +613,8 @@ def main():
             transcript = f.read()
         
         # Generate summary
-        print(f"🧠 Summarizing with OpenRouter using prompt: {args.prompt}...")
-        summary = summarize_with_openrouter(OPENROUTER_API_KEY, transcript, args.prompt)
+        print(f"🧠 Summarizing with OpenRouter using model: {args.model} and prompt: {args.prompt}...")
+        summary = summarize_with_openrouter(OPENROUTER_API_KEY, transcript, args.prompt, args.model)
         
         # Only proceed if summary generation was successful (not an error message)
         if summary and not summary.startswith("Error:") and not summary.startswith("An error occurred"):

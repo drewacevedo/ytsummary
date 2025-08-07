@@ -54,12 +54,12 @@ python ytsummary.py @meetandrew --days 7
 python ytsummary.py "@meetandrew,@codingwithdrew" --days 3
 ```
 
-**Process specific video IDs:**
+**Process specific video IDs (no date filtering applied):**
 ```bash
 python ytsummary.py dQw4w9WgXcQ --video-ids
 ```
 
-**Process multiple video IDs:**
+**Process multiple video IDs (no date filtering applied):**
 ```bash
 python ytsummary.py "dQw4w9WgXcQ,jNQXAC9IVRw" --video-ids
 ```
@@ -69,9 +69,10 @@ python ytsummary.py "dQw4w9WgXcQ,jNQXAC9IVRw" --video-ids
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `inputs` | - | Comma-separated channel handles or video IDs | Required |
-| `--days` | `-d` | Number of days to look back for videos | 1 |
-| `--video-ids` | `-v` | Treat inputs as video IDs instead of channel handles | False |
+| `--days` | `-d` | Number of days to look back for videos (ignored when using --video-ids) | 1 |
+| `--video-ids` | `-v` | Treat inputs as video IDs instead of channel handles (no date filtering) | False |
 | `--prompt` | `-p` | Path to the prompt file for AI summarization | prompt.txt |
+| `--model` | `-m` | AI model to use for summarization | qwen/qwen3-30b-a3b-instruct-2507 |
 | `--include-previous` | - | Copy existing summaries from previous runs instead of regenerating | False |
 
 ### Examples
@@ -98,6 +99,12 @@ python ytsummary.py @meetandrew --days 7 --include-previous
 # Use different prompts for different content types
 python ytsummary.py @educationalchannel --prompt educational_prompt.txt
 python ytsummary.py @techchannel --prompt tech_prompt.txt
+
+# Use a different AI model
+python ytsummary.py @meetandrew --model anthropic/claude-3-haiku
+
+# Combine options: custom model and prompt
+python ytsummary.py @meetandrew --model anthropic/claude-3-sonnet --prompt custom_prompt.txt
 ```
 
 ## Output Structure
@@ -180,11 +187,15 @@ This flexibility allows you to tailor the AI's summarization style to match the 
 
 ### Supported Models
 
-The tool uses OpenRouter's `qwen/qwen3-30b-a3b-instruct-2507` model by default. You can change this in the `summarize_with_openrouter()` function:
+The tool uses OpenRouter's `qwen/qwen3-30b-a3b-instruct-2507` model by default. You can specify a different model at runtime using the `--model` parameter:
 
-```python
-model="anthropic/claude-3-haiku",  # Example alternative
+```bash
+python ytsummary.py @meetandrew --model anthropic/claude-3-haiku
+python ytsummary.py @meetandrew --model anthropic/claude-3-sonnet
+python ytsummary.py @meetandrew --model openai/gpt-4o
 ```
+
+Any model available through OpenRouter can be used by specifying its model identifier.
 
 ### API Rate Limits
 
@@ -226,9 +237,6 @@ youtube-summarizer/
 │   │   ├── transcripts/    # Transcripts for this run
 │   │   └── summaries/      # Summaries for this run
 │   └── ...
-├── transcripts/            # Legacy directory (may contain old files)
-├── summaries/              # Legacy directory (may contain old files)
-├── prompts/                # Additional prompt files directory
 └── README.md              # This file
 ```
 
