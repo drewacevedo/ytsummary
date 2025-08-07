@@ -117,9 +117,6 @@ project/
 │   └── MMDDYY_HHMM_1/         # Additional runs (if multiple in same minute)
 │       ├── transcripts/
 │       └── summaries/
-├── transcripts/               # Legacy directory (still present)
-├── summaries/                 # Legacy directory (still present)
-├── prompts/
 └── prompt.txt
 ```
 
