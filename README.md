@@ -6,11 +6,12 @@ A Python tool that automatically downloads transcripts from YouTube videos and g
 
 - 🎯 **Channel-based Processing**: Fetch videos from YouTube channels using handles (e.g., `@meetandrew`)
 - 📹 **Individual Video Processing**: Process specific videos using their YouTube video IDs
-- 📅 **Date Filtering**: Only process videos published within a specified number of days
+- 📅 **Time Filtering**: Filter videos by days and/or hours (e.g., last 2 hours, or 1 day and 2 hours)
+- 🎥 **Smart Filtering**: Automatically skips YouTube Shorts and live content
 - 📝 **Automatic Transcription**: Extract transcripts using yt-dlp with subtitle support
 - 🤖 **AI Summarization**: Generate intelligent summaries using OpenRouter's AI models
 - 📁 **Organized Output**: Saves transcripts and summaries in separate directories
-- 🔄 **Smart Caching**: Skips already processed videos to save time and API costs
+- 🔄 **Smart Caching**: Skips already processed videos and caches channel IDs to save time and API costs
 - ⚙️ **Customizable Prompts**: Use external prompt files for different summarization styles
 
 ## Prerequisites
@@ -69,19 +70,23 @@ python ytsummary.py "dQw4w9WgXcQ,jNQXAC9IVRw" --video-ids
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `inputs` | - | Comma-separated channel handles or video IDs | Required |
-| `--days` | `-d` | Number of days to look back for videos (ignored when using --video-ids) | 1 |
+| `--days` | `-d` | Number of days to look back for videos (ignored when using --video-ids) | 0 |
+| `--hours` | `-hr` | Number of hours to look back for videos (ignored when using --video-ids) | 24 |
 | `--video-ids` | `-v` | Treat inputs as video IDs instead of channel handles (no date filtering) | False |
 | `--prompt` | `-p` | Path to the prompt file for AI summarization | prompt.txt |
-| `--model` | `-m` | AI model to use for summarization | qwen/qwen3-30b-a3b-instruct-2507 |
+| `--model` | `-m` | AI model to use for summarization | google/gemini-2.5-flash-lite |
 | `--include-previous` | - | Copy existing summaries from previous runs instead of regenerating | False |
 
 ### Examples
 
 ```bash
-# Get videos from the last 24 hours
-python ytsummary.py @meetandrew
+# Get videos from the last 2 hours
+python ytsummary.py @meetandrew --hours 2
 
-# Get videos from the last week
+# Get videos from last 1 day and 2 hours
+python ytsummary.py @meetandrew --days 1 --hours 2
+
+# Get videos from the last week (7 days)
 python ytsummary.py @meetandrew --days 7
 
 # Process specific videos
@@ -187,7 +192,7 @@ This flexibility allows you to tailor the AI's summarization style to match the 
 
 ### Supported Models
 
-The tool uses OpenRouter's `qwen/qwen3-30b-a3b-instruct-2507` model by default. You can specify a different model at runtime using the `--model` parameter:
+The tool uses OpenRouter's `google/gemini-2.5-flash-lite` model by default. You can specify a different model at runtime using the `--model` parameter:
 
 ```bash
 python ytsummary.py @meetandrew --model anthropic/claude-3-haiku
@@ -228,16 +233,17 @@ Any model available through OpenRouter can be used by specifying its model ident
 
 ```
 youtube-summarizer/
-├── ytsummary.py    # Main script
-├── requirements.txt         # Python dependencies
-├── prompt.txt              # AI summarization prompt
-├── .env                    # Environment variables (create this)
-├── processed/              # Organized datetime folders for each run
-│   ├── MMDDYY_HHMM/        # Individual run folders
-│   │   ├── transcripts/    # Transcripts for this run
-│   │   └── summaries/      # Summaries for this run
+├── ytsummary.py           # Main script
+├── requirements.txt       # Python dependencies
+├── prompt.txt            # AI summarization prompt
+├── .env                  # Environment variables (create this)
+├── channel_id_cache.json # Cache file to prevent duplicate channel ID lookups
+├── processed/            # Organized datetime folders for each run
+│   ├── MMDDYY_HHMM/     # Individual run folders
+│   │   ├── transcripts/ # Transcripts for this run
+│   │   └── summaries/   # Summaries for this run
 │   └── ...
-└── README.md              # This file
+└── README.md            # This file
 ```
 
 ## Dependencies

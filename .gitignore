@@ -82,3 +82,4 @@ processed/
 # Temporary files
 *.tmp
 *.temp
+channel_id_cache.json

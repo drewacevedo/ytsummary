@@ -3,15 +3,41 @@ import tempfile
 import argparse
 import shutil
 import glob
+import time
+import json
 from openai import OpenAI
 from googleapiclient.discovery import build
 import yt_dlp
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
+def load_channel_cache():
+    """
+    Loads the channel ID cache from file.
+    
+    Returns:
+        dict: The cached channel ID mappings
+    """
+    try:
+        with open('channel_id_cache.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"handles": {}}
+
+def save_channel_cache(cache):
+    """
+    Saves the channel ID cache to file.
+    
+    Args:
+        cache (dict): The channel ID mappings to save
+    """
+    with open('channel_id_cache.json', 'w') as f:
+        json.dump(cache, f, indent=4)
+
 def get_channel_id_from_handle(youtube, channel_handle):
     """
     Converts a YouTube channel handle to its channel ID.
+    Uses a cache file to store and lookup previously resolved channel IDs.
     
     Args:
         youtube: The authenticated YouTube Data API service object.
@@ -25,6 +51,12 @@ def get_channel_id_from_handle(youtube, channel_handle):
         clean_handle = channel_handle.strip()
         if not clean_handle.startswith('@'):
             clean_handle = '@' + clean_handle
+            
+        # Check cache first
+        cache = load_channel_cache()
+        if clean_handle in cache["handles"]:
+            print(f"✅ Found cached channel ID for '{clean_handle}'")
+            return cache["handles"][clean_handle]
         
         # Try to get channel by handle using the newer forHandle parameter
         try:
@@ -35,7 +67,12 @@ def get_channel_id_from_handle(youtube, channel_handle):
             channel_response = channel_request.execute()
             
             if channel_response['items']:
-                return channel_response['items'][0]['id']
+                channel_id = channel_response['items'][0]['id']
+                # Cache the result
+                cache = load_channel_cache()
+                cache["handles"][clean_handle] = channel_id
+                save_channel_cache(cache)
+                return channel_id
         except Exception as e:
             print(f"⚠️  forHandle API not available or failed for '{clean_handle}': {e}")
         
@@ -49,7 +86,12 @@ def get_channel_id_from_handle(youtube, channel_handle):
             channel_response = channel_request.execute()
             
             if channel_response['items']:
-                return channel_response['items'][0]['id']
+                channel_id = channel_response['items'][0]['id']
+                # Cache the result
+                cache = load_channel_cache()
+                cache["handles"][clean_handle] = channel_id
+                save_channel_cache(cache)
+                return channel_id
         except:
             pass  # If forUsername fails, continue to search method
         
@@ -67,12 +109,22 @@ def get_channel_id_from_handle(youtube, channel_handle):
             # Check if the channel title or custom URL matches
             if (clean_handle.lower() in item['snippet']['title'].lower() or 
                 handle_without_at.lower() in item['snippet']['title'].lower()):
-                return item['snippet']['channelId']
+                channel_id = item['snippet']['channelId']
+                # Cache the result
+                cache = load_channel_cache()
+                cache["handles"][clean_handle] = channel_id
+                save_channel_cache(cache)
+                return channel_id
         
         # If no exact match, return the first result if available
         if search_response['items']:
             print(f"⚠️  No exact match found for handle '{clean_handle}'. Using closest match: '{search_response['items'][0]['snippet']['title']}'")
-            return search_response['items'][0]['snippet']['channelId']
+            channel_id = search_response['items'][0]['snippet']['channelId']
+            # Cache the result
+            cache = load_channel_cache()
+            cache["handles"][clean_handle] = channel_id
+            save_channel_cache(cache)
+            return channel_id
         
         print(f"❌ No channel found for handle: {clean_handle}")
         return None
@@ -139,23 +191,42 @@ def get_channel_videos(youtube, channel_id, cutoff_date):
             # Batch fetch video details to check for live streaming
             if video_ids_batch:
                 video_details_request = youtube.videos().list(
-                    part='liveStreamingDetails',
+                    part='liveStreamingDetails,contentDetails',
                     id=','.join(video_ids_batch)
                 )
                 video_details_response = video_details_request.execute()
                 
-                # Filter out live content
+                # Filter out live content and shorts
                 for video_detail in video_details_response['items']:
                     video_id = video_detail['id']
                     is_live_content = 'liveStreamingDetails' in video_detail
                     
-                    if not is_live_content:
-                        # Only add non-live content
+                    # Parse duration to seconds
+                    duration = video_detail['contentDetails']['duration']
+                    # Convert ISO 8601 duration to seconds
+                    duration_seconds = 0
+                    import re
+                    time_pattern = re.compile(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?')
+                    match = time_pattern.match(duration)
+                    if match:
+                        hours, minutes, seconds = match.groups()
+                        if hours: duration_seconds += int(hours) * 3600
+                        if minutes: duration_seconds += int(minutes) * 60
+                        if seconds: duration_seconds += int(seconds)
+                    
+                    # Check if it's a short (duration <= 60 seconds)
+                    is_short = duration_seconds <= 60
+                    
+                    if not is_live_content and not is_short:
+                        # Only add non-live, non-short content
                         video_items_map[video_id]['is_live_content'] = False
                         video_items_map[video_id]['channel_id'] = channel_id
                         videos.append(video_items_map[video_id])
                     else:
-                        print(f"🔴 Skipping live content: {video_items_map[video_id]['title']}")
+                        if is_live_content:
+                            print(f"🔴 Skipping live content: {video_items_map[video_id]['title']}")
+                        elif is_short:
+                            print(f"📱 Skipping short video: {video_items_map[video_id]['title']}")
             
             # Check if we hit the cutoff date
             if len(video_ids_batch) == 0:
@@ -172,72 +243,81 @@ def get_channel_videos(youtube, channel_id, cutoff_date):
 def get_transcript(video_id):
     """
     Retrieves the full text transcript for a given YouTube video ID using yt-dlp.
+    Retries up to 2 times with a 5-second wait between attempts.
 
     Args:
         video_id (str): The unique ID of the YouTube video.
 
     Returns:
-        str: The full transcript as a single string, or None if not available.
+        str: The full transcript as a single string, or None if not available after retries.
     """
-    try:
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Configure yt-dlp options
-        ydl_opts = {
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': ['en'],
-            'skip_download': True,
-            'quiet': True,
-            'no_warnings': True,
-        }
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            ydl_opts['outtmpl'] = os.path.join(temp_dir, '%(id)s.%(ext)s')
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        try:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Extract info and download subtitles
-                info = ydl.extract_info(video_url, download=False)
-                ydl.download([video_url])
+            # Configure yt-dlp options
+            ydl_opts = {
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': ['en'],
+                'skip_download': True,
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                ydl_opts['outtmpl'] = os.path.join(temp_dir, '%(id)s.%(ext)s')
                 
-                # Look for subtitle files
-                subtitle_files = []
-                for file in os.listdir(temp_dir):
-                    if file.endswith('.vtt') and video_id in file:
-                        subtitle_files.append(os.path.join(temp_dir, file))
-                
-                if not subtitle_files:
-                    print(f"No subtitle files found for video ID: {video_id}")
-                    return None
-                
-                # Read the first available subtitle file
-                subtitle_file = subtitle_files[0]
-                with open(subtitle_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                # Parse VTT content to extract text
-                transcript_text = []
-                lines = content.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    # Skip VTT headers, timestamps, and empty lines
-                    if (line and 
-                        not line.startswith('WEBVTT') and 
-                        not line.startswith('NOTE') and
-                        not '-->' in line and
-                        not line.isdigit()):
-                        # Remove VTT formatting tags
-                        clean_line = line.replace('<c>', '').replace('</c>', '')
-                        clean_line = clean_line.replace('<i>', '').replace('</i>', '')
-                        clean_line = clean_line.replace('<b>', '').replace('</b>', '')
-                        if clean_line:
-                            transcript_text.append(clean_line)
-                
-                return ' '.join(transcript_text)
-                
-    except Exception as e:
-        print(f"An error occurred retrieving transcript for video ID {video_id}: {e}")
-        return None
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Extract info and download subtitles
+                    info = ydl.extract_info(video_url, download=False)
+                    ydl.download([video_url])
+                    
+                    # Look for subtitle files
+                    subtitle_files = []
+                    for file in os.listdir(temp_dir):
+                        if file.endswith('.vtt') and video_id in file:
+                            subtitle_files.append(os.path.join(temp_dir, file))
+                    
+                    if not subtitle_files:
+                        print(f"No subtitle files found for video ID: {video_id}")
+                        raise Exception("No subtitle files found")
+                    
+                    # Read the first available subtitle file
+                    subtitle_file = subtitle_files[0]
+                    with open(subtitle_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Parse VTT content to extract text
+                    transcript_text = []
+                    lines = content.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        # Skip VTT headers, timestamps, and empty lines
+                        if (line and 
+                            not line.startswith('WEBVTT') and 
+                            not line.startswith('NOTE') and
+                            not '-->' in line and
+                            not line.isdigit()):
+                            # Remove VTT formatting tags
+                            clean_line = line.replace('<c>', '').replace('</c>', '')
+                            clean_line = clean_line.replace('<i>', '').replace('</i>', '')
+                            clean_line = clean_line.replace('<b>', '').replace('</b>', '')
+                            if clean_line:
+                                transcript_text.append(clean_line)
+                    
+                    return ' '.join(transcript_text)
+                    
+        except Exception as e:
+            print(f"An error occurred retrieving transcript for video ID {video_id} (attempt {attempt + 1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:  # Don't wait after the last attempt
+                print(f"⏱️  Waiting 5 seconds before retry...")
+                time.sleep(5)
+    
+    # If we reach here, all attempts failed
+    print(f"❌ Failed to retrieve transcript for video ID {video_id} after {max_attempts} attempts")
+    return None
 
 def get_channel_handle_from_id(youtube, channel_id):
     """
@@ -291,7 +371,7 @@ def get_video_details(youtube, video_id):
     """
     try:
         video_request = youtube.videos().list(
-            part='snippet,liveStreamingDetails',
+            part='snippet,liveStreamingDetails,contentDetails',
             id=video_id
         )
         video_response = video_request.execute()
@@ -304,6 +384,29 @@ def get_video_details(youtube, video_id):
             
             # Check if this is a live stream (past or present)
             is_live_content = 'liveStreamingDetails' in item
+            
+            # Parse duration to seconds
+            duration = item['contentDetails']['duration']
+            # Convert ISO 8601 duration to seconds
+            duration_seconds = 0
+            import re
+            time_pattern = re.compile(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?')
+            match = time_pattern.match(duration)
+            if match:
+                hours, minutes, seconds = match.groups()
+                if hours: duration_seconds += int(hours) * 3600
+                if minutes: duration_seconds += int(minutes) * 60
+                if seconds: duration_seconds += int(seconds)
+            
+            # Check if it's a short (duration <= 60 seconds)
+            is_short = duration_seconds <= 60
+            
+            if is_short:
+                print(f"📱 Skipping short video: {item['snippet']['title']}")
+                return None
+            elif is_live_content:
+                print(f"🔴 Skipping live content: {item['snippet']['title']}")
+                return None
             
             return {
                 'id': video_id,
@@ -321,7 +424,7 @@ def get_video_details(youtube, video_id):
         print(f"An error occurred fetching video details for {video_id}: {e}")
         return None
 
-def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt', model='qwen/qwen3-30b-a3b-instruct-2507'):
+def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt', model='google/gemini-2.5-flash-lite'):
     """
     Summarizes a given text using OpenRouter API.
 
@@ -356,8 +459,9 @@ def summarize_with_openrouter(api_key, transcript, prompt_file='prompt.txt', mod
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=4000,
-            temperature=0.3
+            max_tokens=8000,
+            temperature=0.7,
+            frequency_penalty=1.4
         )
         
         return response.choices[0].message.content
@@ -449,7 +553,8 @@ def main():
         epilog='Example channel handle URL: https://www.youtube.com/@meetandrew'
     )
     parser.add_argument('inputs', nargs='+', help='Comma-separated YouTube channel handles (e.g., "@meetandrew,@codingwithdrew") or video IDs')
-    parser.add_argument('--days', '-d', type=int, default=1, help='Number of days to look back for videos (default: 1)')
+    parser.add_argument('--days', '-d', type=int, default=0, help='Number of days to look back for videos (default: 0)')
+    parser.add_argument('--hours', '-hr', type=int, default=24, help='Number of hours to look back for videos (default: 24)')
     parser.add_argument('--video-ids', '-v', action='store_true', help='Treat inputs as video IDs instead of channel handles')
     parser.add_argument('--prompt', '-p', type=str, default='prompt.txt', help='Path to the prompt file for AI summarization (default: prompt.txt)')
     parser.add_argument('--model', '-m', type=str, default='qwen/qwen3-30b-a3b-instruct-2507', help='Model to use for summarization (default: qwen/qwen3-30b-a3b-instruct-2507)')
@@ -470,9 +575,10 @@ def main():
     inputs_str = ' '.join(args.inputs)  # Join all input arguments in case they were separated by spaces
     inputs = [item.strip() for item in inputs_str.split(',')]
     days_to_check = args.days
+    hours_to_check = args.hours
 
     # 3. Setup
-    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_check)
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_check, hours=hours_to_check)
     youtube_service = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
     
     # Create datetime folder structure
@@ -508,7 +614,12 @@ def main():
                 print(f"❌ Could not fetch details for video ID: {video_id}")
     else:
         # Process as channel handles
-        print(f"\nFetching videos published in the last {days_to_check} day(s)...")
+        time_msg = []
+        if days_to_check > 0:
+            time_msg.append(f"{days_to_check} day(s)")
+        if hours_to_check > 0:
+            time_msg.append(f"{hours_to_check} hour(s)")
+        print(f"\nFetching videos published in the last {' and '.join(time_msg)}...")
         for channel_handle in inputs:
             print(f"\n{'='*50}\nLooking up channel: {channel_handle}\n{'='*50}")
             
@@ -540,9 +651,11 @@ def main():
     # 5. PHASE 1: Process transcripts with duplicate checking
     print(f"\n{'='*60}\nPHASE 1: PROCESSING TRANSCRIPTS\n{'='*60}")
     
-    # Track video IDs processed in this run
+    # Track video IDs processed in this run and consecutive failures
     processed_video_ids = []
     skipped_video_ids = []
+    consecutive_failures = 0
+    max_consecutive_failures = 3
     
     for i, video in enumerate(all_videos, 1):
         print(f"\n[{i}/{len(all_videos)}] Processing transcript for: {video['title']}")
@@ -561,11 +674,15 @@ def main():
             shutil.copy2(existing_transcript_path, transcript_filename)
             
             # Only copy existing summary if --include-previous is specified
-            if args.include_previous and existing_summary_path:
-                print(f"📋 Copying existing summary to current folder...")
-                shutil.copy2(existing_summary_path, summary_filename)
+            if args.include_previous:
+                if existing_summary_path:
+                    print(f"📋 Copying existing summary to current folder...")
+                    shutil.copy2(existing_summary_path, summary_filename)
+                else:
+                    print(f"⚠️  No existing summary found to copy")
             
             processed_video_ids.append(video['id'])
+            consecutive_failures = 0  # Reset counter on success
             print(f"✅ Copied existing transcript for video: {video['title']}")
         else:
             # Download new transcript
@@ -578,8 +695,19 @@ def main():
                     f.write(transcript)
                 print(f"✅ Transcript saved to: {transcript_filename}")
                 processed_video_ids.append(video['id'])
+                consecutive_failures = 0  # Reset counter on success
             else:
                 print(f"❌ Could not retrieve transcript for video {video['id']}")
+                skipped_video_ids.append(video['id'])
+                consecutive_failures += 1
+                print(f"⚠️  Consecutive failures: {consecutive_failures}/{max_consecutive_failures}")
+                
+                # Check if we've hit the maximum consecutive failures
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"\n💥 SCRIPT TERMINATED: {max_consecutive_failures} consecutive transcript failures detected.")
+                    print(f"Failed video IDs: {skipped_video_ids[-max_consecutive_failures:]}")
+                    print("This may indicate a persistent issue with transcript downloading.")
+                    return 1  # Exit with error code
 
     # 6. PHASE 2: Generate summaries
     print(f"\n{'='*60}\nPHASE 2: GENERATING SUMMARIES\n{'='*60}")
